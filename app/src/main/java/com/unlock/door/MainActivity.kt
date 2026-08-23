@@ -41,6 +41,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.unlock.door.ui.theme.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,6 +50,9 @@ class MainActivity : ComponentActivity() {
 
     private var bleManager: BleUnlockManager? = null
     private val logMessages = mutableStateListOf<String>()
+
+    /** 当前开门的协程 Job，用于取消上一次「3 秒后重置」，避免打断新一次开门 */
+    private var unlockJob: Job? = null
 
     private val requestBluetoothEnable =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
@@ -154,7 +158,9 @@ class MainActivity : ComponentActivity() {
             return
         }
         logMessages.clear()
-        lifecycleScope.launch(Dispatchers.Main) {
+        // 若上一次开门还在「3 秒展示期」内又点了一次，取消旧的延迟重置，避免打断本次动画
+        unlockJob?.cancel()
+        unlockJob = lifecycleScope.launch(Dispatchers.Main) {
             try { withContext(Dispatchers.IO) { manager.unlock() } }
             catch (_: Exception) {}
             // 成功后 3 秒自动恢复初始状态

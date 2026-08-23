@@ -13,9 +13,11 @@ import kotlinx.coroutines.*
 
 class UnlockService : Service() {
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var unlockManager: BleUnlockManager? = null
     private var isRunning = false
+    private var resetRunnable: Runnable? = null
+    private var requestId = 0  // 用于区分新旧请求
 
     companion object {
         private const val NOTIFICATION_ID = 10086
@@ -32,8 +34,28 @@ class UnlockService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (isRunning) return START_NOT_STICKY
+        // 取消上一次的延迟重置
+        resetRunnable?.let {
+            Handler(Looper.getMainLooper()).removeCallbacks(it)
+            resetRunnable = null
+        }
+
+        // 递增 requestId，旧协程的 finish() 会发现 requestId 已变而跳过
+        requestId++
+        val currentRequestId = requestId
+
+        // 创建新的 BleUnlockManager，旧协程持有的旧实例不会影响新协程
+        unlockManager?.disconnect()
+        unlockManager = BleUnlockManager(this) { }
+
         isRunning = true
+
+        // 立即更新 Widget 为 UNLOCKING 状态
+        val widgetIntent = Intent(DoorLockWidgetProvider.ACTION_UPDATE_UI).apply {
+            setClass(this@UnlockService, DoorLockWidgetProvider::class.java)
+            putExtra("state", DoorLockWidgetProvider.STATE_UNLOCKING)
+        }
+        sendBroadcast(widgetIntent)
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
@@ -49,23 +71,24 @@ class UnlockService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        val currentManager = unlockManager
         scope.launch {
             try {
                 val adapter = BluetoothAdapter.getDefaultAdapter()
                 if (adapter == null || !adapter.isEnabled) {
-                    finish(false, "请先开启蓝牙")
+                    finish(false, "请先开启蓝牙", currentRequestId)
                     return@launch
                 }
-                if (unlockManager?.hasPermissions() != true) {
-                    finish(false, "请先打开 App 授权 BLE 权限")
+                if (currentManager?.hasPermissions() != true) {
+                    finish(false, "请先打开 App 授权 BLE 权限", currentRequestId)
                     return@launch
                 }
 
                 updateNotification("开门中...", "正在发送凭证")
-                unlockManager?.unlock()
-                finish(true, "门已打开 🔓")
+                currentManager.unlock()
+                finish(true, "门已打开 🔓", currentRequestId)
             } catch (e: Exception) {
-                finish(false, e.message ?: "开门失败")
+                finish(false, e.message ?: "开门失败", currentRequestId)
             }
         }
         return START_NOT_STICKY
@@ -83,7 +106,12 @@ class UnlockService : Service() {
         manager.notify(NOTIFICATION_ID, notification)
     }
 
-    private fun finish(success: Boolean, message: String) {
+    private fun finish(success: Boolean, message: String, requestId: Int = -1) {
+        // 如果 requestId 不匹配，说明是旧请求的 finish()，跳过
+        if (requestId != this.requestId) {
+            return
+        }
+
         // 结果通知
         val intent = packageManager.getLaunchIntentForPackage(packageName)
         val pending = PendingIntent.getActivity(
@@ -112,22 +140,32 @@ class UnlockService : Service() {
         }
         sendBroadcast(widgetIntent)
 
-        // 3 秒还原
-        Handler(Looper.getMainLooper()).postDelayed({
-            val resetIntent = Intent(DoorLockWidgetProvider.ACTION_UPDATE_UI).apply {
-                setClass(this@UnlockService, DoorLockWidgetProvider::class.java)
-                putExtra("state", DoorLockWidgetProvider.STATE_IDLE)
+        // 成功: 3 秒后还原; 失败: 1 秒后还原 (避免打断重试)
+        val delayMs = if (success) 3000L else 1000L
+        val runnable = Runnable {
+            // 再次检查 requestId
+            if (this.requestId == requestId) {
+                val resetIntent = Intent(DoorLockWidgetProvider.ACTION_UPDATE_UI).apply {
+                    setClass(this@UnlockService, DoorLockWidgetProvider::class.java)
+                    putExtra("state", DoorLockWidgetProvider.STATE_IDLE)
+                }
+                sendBroadcast(resetIntent)
+                stopForeground(STOP_FOREGROUND_DETACH)
+                isRunning = false
+                resetRunnable = null
+                stopSelf()
             }
-            sendBroadcast(resetIntent)
-            stopForeground(STOP_FOREGROUND_DETACH)
-            isRunning = false
-            stopSelf()
-        }, 3000)
+        }
+        resetRunnable = runnable
+        Handler(Looper.getMainLooper()).postDelayed(runnable, delayMs)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        resetRunnable?.let {
+            Handler(Looper.getMainLooper()).removeCallbacks(it)
+        }
         isRunning = false
         scope.cancel()
         unlockManager?.disconnect()

@@ -28,6 +28,13 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
         const val STATE_SUCCESS = 2
         const val STATE_FAILED = 3
 
+        /** 进程被杀后重建时，SettingsManager 可能未初始化 */
+        private fun ensureSettingsInit(context: Context) {
+            if (!SettingsManager.isInitialized()) {
+                SettingsManager.init(context.applicationContext)
+            }
+        }
+
         fun updateWidget(context: Context, state: Int = STATE_IDLE) {
             val manager = AppWidgetManager.getInstance(context)
             val ids = manager.getAppWidgetIds(
@@ -152,6 +159,7 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
     }
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+        ensureSettingsInit(context)
         for (id in ids) {
             val options = manager.getAppWidgetOptions(id)
             manager.updateAppWidget(id, buildViews(context, options, STATE_IDLE))
@@ -162,10 +170,12 @@ class DoorLockWidgetProvider : AppWidgetProvider() {
         context: Context, manager: AppWidgetManager, id: Int, options: Bundle
     ) {
         super.onAppWidgetOptionsChanged(context, manager, id, options)
+        ensureSettingsInit(context)
         manager.updateAppWidget(id, buildViews(context, options, STATE_IDLE))
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        ensureSettingsInit(context)
         when (intent.action) {
             ACTION_UNLOCK -> {
                 updateWidget(context, STATE_UNLOCKING)

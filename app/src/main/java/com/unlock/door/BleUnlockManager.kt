@@ -183,37 +183,19 @@ class BleUnlockManager(
                     retryUnlockWithNewKey()
                 }
                 unlockResult.resultCode == 24 -> {
-                    // 24: 凭证过期, *先*更新密钥再重试一次
-                    log("凭证过期(0x18), 尝试更新密钥...")
-                    _statusText.value = "更新密钥..."
-                    val newKey = updateChainKey()
-                    if (newKey != null && !newKey.all { it == '0' }) {
-                        SettingsManager.chainKey = newKey
-                        log("新 chainKey: ${newKey.take(32)}..., 重试开门")
-                        // 重试完整流程
-                        val head2 = Crypto.buildCredentialHead(SettingsManager.chainKey, SettingsManager.deviceId, SettingsManager.projectId)
-                        val headR2 = sendPacketAndWait(head2) ?: throw Exception("重试 0x74 超时")
-                        val headP2 = Crypto.parseResponse(headR2, SettingsManager.deviceId)
-                        if (!headP2.success) throw Exception("重试 0x74 失败")
-                        val packs2 = Crypto.buildCredentialPacks(SettingsManager.chainKey, headP2.ran, SettingsManager.deviceId, SettingsManager.projectId)
-                        for ((i, p) in packs2.withIndex()) {
-                            val r = sendPacketAndWait(p) ?: throw Exception("重试 0x75 分包${i+1} 超时")
-                            if (!Crypto.parseResponse(r, SettingsManager.deviceId).isSuccess)
-                                throw Exception("重试 0x75 分包${i+1} 失败")
-                        }
-                        val unl2 = sendPacketAndWait(Crypto.buildUnlockCommand(SettingsManager.deviceId))
-                            ?: throw Exception("重试 0x78 超时")
-                        val unlR2 = Crypto.parseResponse(unl2, SettingsManager.deviceId)
-                        if (unlR2.isSuccess || unlR2.needUpdateKey) {
-                            log("重试成功, 开门! 🔓")
-                            _state.value = State.SUCCESS
-                            _statusText.value = "开门成功 🔓"
-                        } else {
-                            throw Exception("重试失败: 错误码 ${unlR2.resultCode}")
-                        }
-                    } else {
-                        throw Exception("凭证过期且无法更新, 请用原 App 开门一次")
+                    // 24: 凭证过期, 从服务器获取新凭证后重试
+                    log("凭证过期(0x18), 从服务器刷新凭证...")
+                    _statusText.value = "登录服务器..."
+                    // 先确保登录，再获取参数
+                    val loggedIn = ensureLoggedIn()
+                    if (!loggedIn) {
+                        throw Exception("凭证已过期\n请在设置中登录后重试")
                     }
+                    _statusText.value = "刷新凭证中..."
+                    val newKey = refreshChainKeyFromServer()
+                    if (newKey == null) throw Exception("刷新凭证失败, 请用原 App 开门一次")
+                    // 重试完整开门流程
+                    retryUnlockWithNewKey()
                 }
                 else -> throw Exception("开锁失败: 错误码 ${unlockResult.resultCode}")
             }
@@ -258,7 +240,23 @@ class BleUnlockManager(
         }
     }
 
-    // ─── 从服务器刷新 chainKey（错误 25 自动恢复） ───
+    // ─── 从服务器刷新 chainKey（错误 24/25 自动恢复） ───
+
+    /** 确保已登录：如果 token 缺失则尝试用存储的账号密码自动登录 */
+    private suspend fun ensureLoggedIn(): Boolean {
+        if (SettingsManager.isLoggedIn()) return true
+        val phone = SettingsManager.loginPhone
+        val pwd = SettingsManager.loginPassword
+        if (phone.isBlank() || pwd.isBlank()) return false
+        log("尝试自动登录: $phone")
+        val result = ServerApi.login(phone, pwd)
+        if (result.success) {
+            log("自动登录成功")
+            return true
+        }
+        log("自动登录失败: ${result.error}")
+        return false
+    }
 
     private suspend fun refreshChainKeyFromServer(): String? {
         try {

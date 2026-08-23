@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
@@ -464,7 +465,9 @@ object ServerApi {
                 "projectServerUrl=${SettingsManager.projectServerUrl}, " +
                 "projectSignKey=${SettingsManager.projectSignKey.take(10)}...")
 
-            // ★ 原 App gt 客户端签名方式:
+            // ★ 原 App 的 getAddress() 实际调用的是 keyList 端点 (bN = Ca = () => gt.get(ht.keyList)):
+            //   ht.keyList = "/webapi/v1/staff/credentials"  → 返回门锁地址数组 (含 device_id / credential)
+            //   注意: 不是 /student/accommodation/details (那个现在只返回住宿地址, 不含门锁)
             val srv = SettingsManager.projectServerUrl.ifBlank {
                 throw Exception("未绑定项目")
             }
@@ -473,7 +476,7 @@ object ServerApi {
             val query = signed.entries.joinToString("&") { (k, v) ->
                 "${k}=${URLEncoder.encode(v, "UTF-8")}"
             }
-            val url = "$srv/webapi/v1/student/accommodation/details?$query"
+            val url = "$srv/webapi/v1/staff/credentials?$query"
 
             // gt 客户端不送 Authorization header
             val request = Request.Builder().url(url).get().build()
@@ -493,38 +496,46 @@ object ServerApi {
                 throw Exception(msg.ifBlank { bodyStr.take(200) })
             }
 
-            // data 可能是 JSONObject, JSONArray, 或 base64 字符串
-            var dataObj = json.optJSONObject("data")
-            if (dataObj == null) {
-                val dataArr = json.optJSONArray("data")
-                if (dataArr != null && dataArr.length() > 0) {
-                    dataObj = dataArr.optJSONObject(0)
-                }
+            // ★ 原 App getAddress() 返回的 data 是「门锁地址」数组:
+            //   r.data[0].building_name / device_id / ble_name / ble_mac / credential / credential_id ...
+            //   字段是扁平结构, 直接平铺在数组元素上 (见 localStorage 的 doorLockAddress)
+            var item: JSONObject? = json.optJSONArray("data")?.optJSONObject(0)
+
+            // 兼容: data 是单个 JSONObject
+            if (item == null) {
+                item = json.optJSONObject("data")
             }
-            if (dataObj == null) {
+            // 兼容: data 是 base64 字符串
+            if (item == null) {
                 val dataB64 = json.optString("data", "")
                 if (dataB64.isNotBlank()) {
                     val decoded = decodeBase64Data(dataB64)
-                    dataObj = try { JSONObject(decoded) } catch (_: Exception) { null }
+                    item = try { JSONObject(decoded) } catch (_: Exception) {
+                        try { JSONArray(decoded).optJSONObject(0) } catch (_: Exception) { null }
+                    }
                 }
             }
-            if (dataObj == null) {
-                throw Exception("data 解析失败, 完整响应: ${bodyStr.take(500)}")
+            if (item == null) {
+                // data 为空数组/无门锁地址 → 返回全 0, 上层显示「未找到门锁设备」
+                android.util.Log.d("ServerApi", "fetchAddress: data 为空, 完整响应: $bodyStr")
+                return@withContext AddressInfo(buildingName = "", floorName = "", roomName = "")
             }
-            // accommodation 信息在 accommodation 子对象里
-            val acc = dataObj.optJSONObject("accommodation") ?: dataObj
+
+            // 兼容旧结构: 字段若嵌套在 door_lock / accommodation 子对象里则取子对象, 否则取元素本身
+            val doorLock = item.optJSONObject("door_lock") ?: item
+            val acc = item.optJSONObject("accommodation") ?: item
+
             val building = acc.optString("building_name", "")
             val floor = acc.optString("floor_name", "")
             val room = acc.optString("room_name", "")
 
-            // door_lock 信息 (包含 credential!)
-            val doorLock = dataObj.optJSONObject("door_lock")
-            val devId = doorLock?.optInt("device_id", 0) ?: 0
-            val devName = doorLock?.optString("ble_name", "") ?: ""
-            val mac = doorLock?.optString("ble_mac", "") ?: ""
-            val battery = doorLock?.optInt("battery_level", 0) ?: 0
-            val credId = doorLock?.optInt("credential_id", 0) ?: 0
-            val chainKey = doorLock?.optString("credential", "") ?: ""
+            val devId = doorLock.optInt("device_id", 0)
+            val devName = doorLock.optString("ble_name", "")
+            val mac = doorLock.optString("ble_mac", "")
+            val battery = doorLock.optInt("battery_level", 0)
+            val credId = doorLock.optInt("credential_id", 0)
+            val chainKey = doorLock.optString("credential", "")
+            android.util.Log.d("ServerApi", "fetchAddress 解析: deviceId=$devId ble_name=$devName mac=$mac credential_id=$credId credential=${chainKey.take(8)}...")
 
             return@withContext AddressInfo(
                 buildingName = building,

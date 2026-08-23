@@ -11,7 +11,7 @@ android {
         create("release") {
             storeFile = file("../release.keystore")
             storePassword = "android"
-            keyAlias = "debug"
+            keyAlias = "release"
             keyPassword = "android"
         }
     }
@@ -20,8 +20,8 @@ android {
         applicationId = "com.unlock.door"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {

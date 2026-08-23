@@ -350,7 +350,8 @@ object Crypto {
             RESP_CHAIN_KEY -> {
                 val resultCode = decrypted[0].toInt() and 0xFF
                 val seq = if (decrypted.size >= 5) decrypted[4].toInt() and 0xFF else null
-                val doorOpen = resultCode == ERR_DOOR_ALREADY_OPEN || resultCode == ERR_EXPIRED_BUT_OPEN
+                // 24 (ERR_EXPIRED_BUT_OPEN) 不视为开门成功 — 需走服务器刷新凭证流程
+                val doorOpen = resultCode == ERR_DOOR_ALREADY_OPEN
                 ParseResult(true, cmd, resultCode,
                     isSuccess = resultCode == ERR_SUCCESS || doorOpen,
                     seq = seq, doorAlreadyOpen = doorOpen,
